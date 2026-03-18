@@ -1,0 +1,74 @@
+---
+# ── Agent 2: Avatar Director Job Template ────────────────────────────────
+#
+# Responsibilities:
+#   1. Download script.json from s3://yt-scripts-{env}/{RUN_ID}/script.json
+#   2. Extract voiceover text and build HeyGen API payload
+#   3. POST to HeyGen /v2/video/generate with fixed avatar_id + voice_id
+#   4. Poll HeyGen status endpoint every HEYGEN_POLL_INTERVAL_SEC seconds
+#      (max wait: HEYGEN_MAX_WAIT_SEC = 1800s / 30 min)
+#   5. Stream-download the rendered green-screen MP4
+#   6. Upload to s3://yt-raw-video-{env}/{RUN_ID}/avatar.mp4
+#   7. Update Redis: run:{RUN_ID}:stage = "avatar_ready"
+#   8. Exit 0
+#
+# API credentials: fetched at runtime via IRSA → Secrets Manager (HEYGEN_API_KEY)
+# Long activeDeadlineSeconds: HeyGen render can take 10-30 minutes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: avatar-director-RUNID_PLACEHOLDER
+  namespace: default
+  labels:
+    app: yt-factory-avatar-director
+    app.kubernetes.io/part-of: yt-factory
+    app.kubernetes.io/component: agent
+    pipeline-stage: "2-avatar-director"
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 1
+
+  # HeyGen renders can take up to 30 min; allow 45 min total for the job
+  # (polling overhead + download + S3 upload)
+  activeDeadlineSeconds: 2700
+
+  template:
+    metadata:
+      labels:
+        app: yt-factory-avatar-director
+        app.kubernetes.io/part-of: yt-factory
+    spec:
+      restartPolicy: Never
+      serviceAccountName: avatar-sa
+      imagePullSecrets:
+        - name: dockerhub-secret
+
+      # Light-agents NodePool — this pod does no heavy computation locally;
+      # all rendering is offloaded to HeyGen's cloud API
+      nodeSelector:
+        node.kubernetes.io/pool: light-agents
+
+      containers:
+        - name: avatar-director
+          image: giladi17/yt-factory-avatar-director:latest
+          imagePullPolicy: Always
+
+          envFrom:
+            - configMapRef:
+                name: pipeline-config
+
+          env:
+            - name: RUN_ID
+              value: "RUNID_PLACEHOLDER"
+            - name: ROLE
+              value: "avatar_director"
+            - name: TASK
+              value: "generate_avatar_video"
+
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

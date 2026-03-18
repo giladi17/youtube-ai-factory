@@ -1,0 +1,113 @@
+# ── RBAC for YouTube AI Factory Pipeline ─────────────────────────────────
+#
+# Service account hierarchy:
+#   orchestrator-sa  → ClusterRole (spawns + watches Jobs across namespaces)
+#   scriptwriter-sa  → no K8s permissions (uses IRSA for S3 + Secrets Manager)
+#   avatar-sa        → no K8s permissions (uses IRSA for S3 + Secrets Manager)
+#   video-editor-sa  → no K8s permissions (uses IRSA for S3 only), video-editor ns
+#   publisher-sa     → no K8s permissions (uses IRSA for S3 + Secrets Manager)
+#
+# IRSA annotations use ${AWS_ACCOUNT_ID} placeholder — substituted via
+# envsubst in CI/CD before `kubectl apply`.
+
+---
+# ── Orchestrator Service Account (default namespace) ─────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orchestrator-sa
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+  annotations:
+    # IRSA — allows orchestrator to call Secrets Manager
+    eks.amazonaws.com/role-arn: "arn:aws:iam::${AWS_ACCOUNT_ID}:role/yt-factory-orchestrator-role"
+
+---
+# ── Scriptwriter Service Account ─────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scriptwriter-sa
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::${AWS_ACCOUNT_ID}:role/yt-factory-scriptwriter-role"
+
+---
+# ── Avatar Director Service Account ──────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: avatar-sa
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::${AWS_ACCOUNT_ID}:role/yt-factory-avatar-director-role"
+
+---
+# ── Video Editor Service Account (video-editor namespace) ─────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: video-editor-sa
+  namespace: video-editor
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::${AWS_ACCOUNT_ID}:role/yt-factory-video-editor-role"
+
+---
+# ── SEO Publisher Service Account ────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: publisher-sa
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::${AWS_ACCOUNT_ID}:role/yt-factory-seo-publisher-role"
+
+---
+# ── Orchestrator ClusterRole ──────────────────────────────────────────────
+# Needs cluster-wide job management because it spawns the video-editor Job
+# in the video-editor namespace, and watches all pipeline Jobs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: orchestrator-role
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+rules:
+  # Job lifecycle management — create + delete all 4 agent Jobs
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "get", "list", "watch", "patch"]
+  # Pod observation — read logs for debugging, check pod status
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  # ConfigMap read — fetch pipeline-config for bucket names at startup
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+
+---
+# ── Orchestrator ClusterRoleBinding ──────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: orchestrator-binding
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: orchestrator-role
+subjects:
+  - kind: ServiceAccount
+    name: orchestrator-sa
+    namespace: default

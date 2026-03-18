@@ -1,0 +1,99 @@
+---
+# ── Pipeline Orchestrator — always-on Deployment ─────────────────────────
+#
+# Responsibilities:
+#   1. Expose POST /run webhook → creates a new Scriptwriter Job (Phase 1)
+#   2. Watch K8s Job completions via the API server
+#   3. On Phase 1 complete → spawn Avatar Director Job (Phase 2)
+#   4. On Phase 2 complete → spawn Video Editor Job   (Phase 3, heavy node)
+#   5. On Phase 3 complete → spawn SEO Publisher Job  (Phase 4)
+#   6. Write/read pipeline run state in Redis
+#   7. Expose GET /health for liveness checks
+#   8. Expose GET /status/{run_id} for pipeline observability
+#
+# Replaces: k8s/brain.yaml (openclaw-brain Deployment)
+# Removed: Telegram dependency, Groq routing, hard-coded nodeSelector IP
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yt-factory-orchestrator
+  namespace: default
+  labels:
+    app: yt-factory-orchestrator
+    app.kubernetes.io/part-of: yt-factory
+    app.kubernetes.io/component: orchestrator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: yt-factory-orchestrator
+  template:
+    metadata:
+      labels:
+        app: yt-factory-orchestrator
+        app.kubernetes.io/part-of: yt-factory
+    spec:
+      serviceAccountName: orchestrator-sa
+      imagePullSecrets:
+        - name: dockerhub-secret
+
+      # Schedule on the always-on managed node group — never on Karpenter nodes
+      nodeSelector:
+        node.kubernetes.io/pool: light-agents
+
+      containers:
+        - name: orchestrator
+          image: giladi17/yt-factory-orchestrator:latest
+          ports:
+            - name: http
+              containerPort: 8080
+
+          envFrom:
+            - configMapRef:
+                name: pipeline-config
+
+          # No API key secrets here — orchestrator uses IRSA to call
+          # Secrets Manager only if it needs to inspect credentials.
+          # K8s credentials come from the mounted ServiceAccount token.
+
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+---
+# ── Orchestrator Service — reachable by the CronJob trigger pod ───────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator-service
+  namespace: default
+  labels:
+    app: yt-factory-orchestrator
+    app.kubernetes.io/part-of: yt-factory
+spec:
+  selector:
+    app: yt-factory-orchestrator
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP

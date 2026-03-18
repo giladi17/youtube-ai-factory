@@ -1,0 +1,41 @@
+---
+# ── ResourceQuota: default namespace (light agents) ───────────────────────
+# Light agents (Scriptwriter, Avatar Director, SEO Publisher, Orchestrator)
+# run on Spot t3.medium nodes (2 vCPU, 4 GiB each).
+# Up to 5 concurrent nodes = 10 vCPU / 20 GiB available.
+# Quota is set conservatively to catch runaway job creation.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: yt-factory-quota
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+spec:
+  hard:
+    count/jobs.batch: "20"       # max 20 concurrent batch jobs (pipeline + retries)
+    pods: "40"                   # max 40 pods (headroom for rollouts)
+    requests.memory: "4Gi"       # ~4 light-agent pods at 256Mi request each × safety margin
+    requests.cpu: "4"            # ~16 light-agent pods at 250m request
+    limits.memory: "8Gi"
+    limits.cpu: "8"
+
+---
+# ── ResourceQuota: video-editor namespace (heavy rendering job) ─────────
+# Runs on Karpenter-provisioned c5.2xlarge (8 vCPU, 16 GiB).
+# Only 1 render job expected at a time; quota hard-caps at 2 for safety.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: video-editor-quota
+  namespace: video-editor
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+spec:
+  hard:
+    count/jobs.batch: "2"        # max 2 concurrent render jobs
+    pods: "4"                    # 2 jobs × 1 pod each + 2 headroom
+    requests.memory: "6Gi"       # 1 render job at 4Gi request
+    requests.cpu: "3"            # 1 render job at 2 CPU request
+    limits.memory: "16Gi"        # hard ceiling — prevents OOM from killing the node
+    limits.cpu: "8"

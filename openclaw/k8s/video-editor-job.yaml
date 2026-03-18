@@ -1,0 +1,133 @@
+---
+# ── Agent 3: Video Editor Job Template ★ HEAVY ★ ─────────────────────────
+#
+# Responsibilities:
+#   1. Download all inputs from S3 to ephemeral /tmp:
+#        - avatar.mp4   (from yt-raw-video)
+#        - script.json  (from yt-scripts — for subtitle timestamps)
+#        - B-roll clips (from yt-assets/broll/)
+#        - background music (from yt-assets/music/ — random selection)
+#   2. Run FFmpeg pipeline:
+#        a. Chroma-key: remove green screen from avatar.mp4
+#        b. Composite: avatar layer over branded background
+#        c. B-roll intercutting per script.json segment timestamps
+#        d. Subtitle burn-in from script.json text (libass)
+#        e. Audio mix: voiceover + background music at -20dBFS
+#        f. Final encode: H.264, 1080p@30fps, AAC 192k, YouTube-optimal bitrate
+#   3. Upload final.mp4 to s3://yt-final-video-{env}/{RUN_ID}/final.mp4
+#   4. Update Redis: run:{RUN_ID}:stage = "video_ready"
+#   5. Exit 0 cleanly → pod terminates → Karpenter reclaims c5.2xlarge in ~30s
+#
+# ─────────────────────────────────────────────────────────────────────────
+# KARPENTER TARGETING:
+#   nodeSelector: node.kubernetes.io/pool: video-editor
+#   → Karpenter provisions an on-demand c5.2xlarge (8 vCPU, 16 GiB)
+#
+# TAINT TOLERATION:
+#   The video-editor NodePool taints all its nodes: workload=video-editor:NoSchedule
+#   This job MUST declare the matching toleration — no other pod can land here.
+#
+# FINOPS:
+#   ttlSecondsAfterFinished: 60 → pod deleted 1 min after completion
+#   Karpenter consolidateAfter: 30s → node terminated ~90s after job finishes
+#   Total cost for a ~10-min render: c5.2xlarge @ $0.34/hr ≈ $0.006 per video
+# ─────────────────────────────────────────────────────────────────────────
+#
+# Namespace: video-editor  (NOT default — isolated heavy workload)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: video-editor-RUNID_PLACEHOLDER
+  namespace: video-editor
+  labels:
+    app: yt-factory-video-editor
+    app.kubernetes.io/part-of: yt-factory
+    app.kubernetes.io/component: agent
+    pipeline-stage: "3-video-editor"
+spec:
+  # Aggressive TTL — pod must die fast so Karpenter can consolidate the node
+  ttlSecondsAfterFinished: 60
+
+  # Never retry a failed render — FFmpeg failures are deterministic bugs,
+  # not transient errors. Retrying wastes expensive compute.
+  backoffLimit: 1
+
+  # 60-minute hard ceiling: handles long videos + slow S3 download/upload
+  activeDeadlineSeconds: 3600
+
+  template:
+    metadata:
+      labels:
+        app: yt-factory-video-editor
+        app.kubernetes.io/part-of: yt-factory
+    spec:
+      restartPolicy: Never
+      serviceAccountName: video-editor-sa
+      imagePullSecrets:
+        - name: dockerhub-secret
+
+      # ── Critical: target the Karpenter video-editor NodePool ─────────
+      nodeSelector:
+        node.kubernetes.io/pool: video-editor
+
+      # ── Critical: tolerate the taint that guards this node pool ──────
+      tolerations:
+        - key: "workload"
+          operator: "Equal"
+          value: "video-editor"
+          effect: "NoSchedule"
+
+      # Give the node up to 90 seconds to provision before giving up
+      # (Karpenter typically provisions in 60-90s for cold starts)
+      initContainers:
+        - name: wait-for-node
+          image: busybox:1.36
+          command: ["sh", "-c", "echo 'Node provisioned, starting render'"]
+          resources:
+            requests:
+              memory: "8Mi"
+              cpu: "10m"
+            limits:
+              memory: "16Mi"
+              cpu: "50m"
+
+      containers:
+        - name: video-editor
+          # Must be built on top of jrottenberg/ffmpeg or include FFmpeg 6.x
+          # Example: FROM jrottenberg/ffmpeg:6-ubuntu AS ffmpeg-base
+          image: giladi17/yt-factory-video-editor:latest
+          imagePullPolicy: Always
+
+          envFrom:
+            - configMapRef:
+                name: pipeline-config
+
+          env:
+            - name: RUN_ID
+              value: "RUNID_PLACEHOLDER"
+            - name: ROLE
+              value: "video_editor"
+            - name: TASK
+              value: "render_final_video"
+
+          resources:
+            # Requests: enough for FFmpeg 1080p encoding (2 vCPU, 4 GiB)
+            requests:
+              memory: "4Gi"
+              cpu: "2"
+            # Limits: match the c5.2xlarge capacity; the node is dedicated
+            # to this pod so high limits are safe and enable peak performance
+            limits:
+              memory: "8Gi"
+              cpu: "4"
+
+          # Large ephemeral storage for downloaded S3 assets + FFmpeg temp files
+          # A 10-min 1080p video + B-roll + render workspace = ~8-15 GiB
+          volumeMounts:
+            - name: render-workspace
+              mountPath: /tmp/render
+
+      volumes:
+        - name: render-workspace
+          emptyDir:
+            sizeLimit: "20Gi"

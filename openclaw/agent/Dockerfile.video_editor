@@ -1,0 +1,32 @@
+# ── Video Editor image — heavy FFmpeg rendering agent ─────────────────────
+# Adds FFmpeg 6 via apt on top of python:3.11-slim.
+# Built for linux/amd64 only (Karpenter c5.2xlarge is x86).
+# Image: giladi17/yt-factory-video-editor:latest
+FROM python:3.11-slim AS builder
+
+WORKDIR /app
+# Video editor only needs boto3, redis, requests — no OpenAI/Google SDK
+RUN pip install --user --no-cache-dir \
+    boto3==1.34.131 \
+    redis==5.0.1 \
+    requests==2.32.3
+
+FROM python:3.11-slim
+
+# Install FFmpeg from Debian repos
+# ffmpeg package on bookworm includes: libx264, libass (subtitles), aac, opus
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /root/.local /root/.local
+
+# Only the dispatcher and the video editor skill are needed in this image
+COPY agent.py        .
+COPY video_editor.py .
+
+ENV PATH=/root/.local/bin:$PATH
+
+CMD ["python", "agent.py"]

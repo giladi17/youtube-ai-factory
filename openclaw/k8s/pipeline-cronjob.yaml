@@ -1,0 +1,77 @@
+---
+# ── Pipeline CronJob — scheduled content production trigger ───────────────
+#
+# Fires Mon / Wed / Fri at 08:00 UTC.
+# Creates a short-lived Job that sends POST /run to the orchestrator's
+# webhook endpoint. The orchestrator handles all 4 pipeline stages.
+#
+# To trigger manually (one-off video):
+#   kubectl create job --from=cronjob/yt-factory-pipeline manual-run-$(date +%s)
+#
+# Replaces: k8s/cronjob.yaml (openclaw-morning + openclaw-evening CronJobs)
+# Removed: stock scanner schedules, Alpaca/Telegram secrets
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: yt-factory-pipeline
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+    app.kubernetes.io/component: scheduler
+spec:
+  # Mon / Wed / Fri at 08:00 UTC
+  schedule: "0 8 * * 1,3,5"
+
+  # Never run concurrent pipelines — previous run must finish first
+  concurrencyPolicy: Forbid
+
+  # Keep last 3 successful and 1 failed job for debugging
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+  jobTemplate:
+    spec:
+      # Clean up trigger pod 5 minutes after it completes
+      ttlSecondsAfterFinished: 300
+      backoffLimit: 2
+      activeDeadlineSeconds: 60    # trigger call should complete in <1 min
+
+      template:
+        metadata:
+          labels:
+            app: yt-factory-trigger
+            app.kubernetes.io/part-of: yt-factory
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: orchestrator-sa
+          imagePullSecrets:
+            - name: dockerhub-secret
+
+          nodeSelector:
+            node.kubernetes.io/pool: light-agents
+
+          containers:
+            - name: trigger
+              # Minimal curl container — just fires the webhook and exits
+              image: curlimages/curl:8.7.1
+              command:
+                - sh
+                - -c
+                - |
+                  echo "Triggering YouTube AI Factory pipeline at $(date -u)"
+                  curl --fail --silent --show-error \
+                       --max-time 30 \
+                       --retry 3 \
+                       --retry-delay 5 \
+                       -X POST \
+                       -H "Content-Type: application/json" \
+                       -d '{"source": "cronjob", "schedule": "'"$(date +%A)"'"}' \
+                       http://orchestrator-service:8080/run
+                  echo "Pipeline trigger successful — run initiated"
+              resources:
+                requests:
+                  memory: "16Mi"
+                  cpu: "50m"
+                limits:
+                  memory: "32Mi"
+                  cpu: "100m"

@@ -1,0 +1,82 @@
+---
+# ── Agent 1: Scriptwriter Job Template ───────────────────────────────────
+#
+# Responsibilities:
+#   1. Fetch and parse RSS feeds (TechCrunch, Hacker News, Ars Technica)
+#   2. Call OpenAI GPT-4o to rank topics by YouTube engagement potential
+#   3. Generate structured script JSON: { topic, hook, body[3], cta, keywords[], duration_est }
+#   4. Write script.json to s3://yt-scripts-{env}/{RUN_ID}/script.json
+#   5. Update Redis: run:{RUN_ID}:stage = "scripted"
+#   6. Exit 0 (orchestrator detects Job completion and spawns Phase 2)
+#
+# API credentials: fetched at runtime via IRSA → Secrets Manager (OPENAI_API_KEY)
+# NOT spawned directly — orchestrator creates this Job with a unique RUN_ID.
+# This file serves as the canonical template (used in CI/CD and manual tests).
+#
+# Manual test run:
+#   RUN_ID=test-$(date +%s)
+#   kubectl create job scriptwriter-$RUN_ID \
+#     --from=job/scriptwriter-template \
+#     -- env RUN_ID=$RUN_ID
+#   (or edit RUN_ID below and: kubectl apply -f scriptwriter-job.yaml)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scriptwriter-RUNID_PLACEHOLDER
+  namespace: default
+  labels:
+    app: yt-factory-scriptwriter
+    app.kubernetes.io/part-of: yt-factory
+    app.kubernetes.io/component: agent
+    pipeline-stage: "1-scriptwriter"
+spec:
+  # Job exits promptly — no reason to keep it alive
+  ttlSecondsAfterFinished: 300
+
+  # Fail fast — if the script fails twice, alert and stop (don't burn OpenAI tokens)
+  backoffLimit: 1
+
+  # RSS scraping + GPT-4o call should complete in < 5 min
+  activeDeadlineSeconds: 600
+
+  template:
+    metadata:
+      labels:
+        app: yt-factory-scriptwriter
+        app.kubernetes.io/part-of: yt-factory
+    spec:
+      restartPolicy: Never
+      serviceAccountName: scriptwriter-sa
+      imagePullSecrets:
+        - name: dockerhub-secret
+
+      # Light-agents Karpenter NodePool (Spot t3.medium)
+      nodeSelector:
+        node.kubernetes.io/pool: light-agents
+
+      containers:
+        - name: scriptwriter
+          image: giladi17/yt-factory-scriptwriter:latest
+          imagePullPolicy: Always
+
+          # S3 bucket names and AWS config from ConfigMap
+          envFrom:
+            - configMapRef:
+                name: pipeline-config
+
+          env:
+            # Injected by orchestrator at Job creation time
+            - name: RUN_ID
+              value: "RUNID_PLACEHOLDER"
+            - name: ROLE
+              value: "scriptwriter"
+            - name: TASK
+              value: "produce_script"
+
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
