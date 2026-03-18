@@ -61,6 +61,8 @@ AWS_REGION            = os.environ.get("AWS_REGION", "eu-north-1")
 REDIS_HOST            = os.environ.get("REDIS_HOST", "redis-service")
 RESOLUTION            = os.environ.get("VIDEO_EDITOR_TARGET_RESOLUTION", "1920x1080")
 FPS                   = os.environ.get("VIDEO_EDITOR_TARGET_FPS", "30")
+# Faceless mode: set to a local voiceover path to skip avatar download + chromakey
+FACELESS_AUDIO        = os.environ.get("FACELESS_AUDIO", "")
 
 # Local asset directories (override with ASSETS_BASE env var for K8s volume mounts)
 _HERE        = Path(__file__).resolve().parent
@@ -596,6 +598,79 @@ def _run_ffmpeg(cmd: list[str], label: str = "") -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Pass 2b — Faceless composite (voiceover audio, no avatar/chromakey)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _render_final_faceless(
+    voiceover: Path,
+    broll_timeline: Path,
+    music: Optional[Path],
+    srt: Path,
+    body: list[dict],
+    output: Path,
+    codec: str,
+    codec_args: list[str],
+    font: Optional[Path] = None,
+) -> None:
+    """
+    Faceless composite — no avatar, no chromakey.
+    Inputs:
+      0: voiceover.mp3   (audio track only)
+      1: broll_timeline  (video track only)
+      2: music           (optional background audio)
+
+    Filtergraph:
+      Video: b-roll → subtitle burn-in → title cards
+      Audio: voiceover sidechain-ducks music, final amix
+    """
+    srt_escaped = str(srt.resolve()).replace("\\", "/").replace(":", "\\:")
+
+    inputs = ["-i", str(voiceover), "-i", str(broll_timeline)]
+    music_idx = None
+    if music:
+        inputs += ["-i", str(music)]
+        music_idx = 2
+
+    drawtext = _build_drawtext_chain(body)
+
+    # _build_subtitle_filter expects [composed] input tag
+    filter_complex = (
+        "[1:v] null [composed];"
+        + _build_subtitle_filter(srt_escaped, font)
+        + f"[subbed] {drawtext} [video_out];"
+    )
+
+    if music_idx:
+        filter_complex += (
+            "[0:a] asplit=2[voice][sc];"
+            f"[{music_idx}:a] asetpts=PTS-STARTPTS [music_raw];"
+            "[music_raw][sc] sidechaincompress="
+            "threshold=-25dB:ratio=8:attack=5:release=300:makeup=1 [ducked];"
+            "[voice][ducked] amix=inputs=2:normalize=0:weights=1 0.5 [audio_out]"
+        )
+    else:
+        filter_complex += "[0:a] anull [audio_out]"
+
+    cmd = (
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "info"]
+        + inputs
+        + [
+            "-filter_complex", filter_complex,
+            "-map", "[video_out]",
+            "-map", "[audio_out]",
+            "-c:v", codec, *codec_args,
+            "-r", FPS,
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",          # stop at whichever stream ends first
+            "-movflags", "+faststart",
+            str(output),
+        ]
+    )
+    _run_ffmpeg(cmd, label="final composite (faceless)")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Redis
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -617,8 +692,17 @@ def run() -> None:
     codec, codec_args = _detect_hw_encoder()
 
     # ── 2. Download primary inputs from S3 ───────────────────────────────────
-    avatar_path = _download(S3_RAW_VIDEO_BUCKET, f"{RUN_ID}/avatar.mp4",  WORKSPACE / "avatar.mp4")
-    script_path = _download(S3_SCRIPTS_BUCKET,   f"{RUN_ID}/script.json", WORKSPACE / "script.json")
+    faceless = bool(FACELESS_AUDIO)
+    if faceless:
+        voiceover_path = Path(FACELESS_AUDIO)
+        if not voiceover_path.exists():
+            raise FileNotFoundError(f"FACELESS_AUDIO not found: {voiceover_path}")
+        logger.info(f"Faceless mode | voiceover={voiceover_path.name} "
+                    f"({voiceover_path.stat().st_size // 1024} KB) | avatar skipped")
+        avatar_path = None
+    else:
+        avatar_path = _download(S3_RAW_VIDEO_BUCKET, f"{RUN_ID}/avatar.mp4", WORKSPACE / "avatar.mp4")
+    script_path = _download(S3_SCRIPTS_BUCKET, f"{RUN_ID}/script.json", WORKSPACE / "script.json")
 
     # ── 3. Resolve assets (local-first, S3 fallback) ─────────────────────────
     background = _get_background()
@@ -663,17 +747,30 @@ def run() -> None:
 
     # ── 8. Pass 2: Final composite ────────────────────────────────────────────
     tmp_output = WORKSPACE / "final.mp4"
-    _render_final(
-        avatar         = avatar_path,
-        broll_timeline = broll_timeline,
-        music          = music,
-        srt            = srt_path,
-        body           = body,
-        output         = tmp_output,
-        codec          = codec,
-        codec_args     = codec_args,
-        font           = font,
-    )
+    if faceless:
+        _render_final_faceless(
+            voiceover      = voiceover_path,
+            broll_timeline = broll_timeline,
+            music          = music,
+            srt            = srt_path,
+            body           = body,
+            output         = tmp_output,
+            codec          = codec,
+            codec_args     = codec_args,
+            font           = font,
+        )
+    else:
+        _render_final(
+            avatar         = avatar_path,
+            broll_timeline = broll_timeline,
+            music          = music,
+            srt            = srt_path,
+            body           = body,
+            output         = tmp_output,
+            codec          = codec,
+            codec_args     = codec_args,
+            font           = font,
+        )
 
     if not tmp_output.exists() or tmp_output.stat().st_size < 50_000:
         raise RuntimeError(f"Output missing or too small: {tmp_output.stat().st_size} bytes")
