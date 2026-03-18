@@ -1,0 +1,6 @@
+file 'C:\Users\yariv\Desktop\gilad\youtube-ai-factory\openclaw\tmp_render_test\tmp_segments\seg_00.mp4'
+file 'C:\Users\yariv\Desktop\gilad\youtube-ai-factory\openclaw\tmp_render_test\tmp_segments\seg_01.mp4'
+file 'C:\Users\yariv\Desktop\gilad\youtube-ai-factory\openclaw\tmp_render_test\tmp_segments\seg_02.mp4'
+file 'C:\Users\yariv\Desktop\gilad\youtube-ai-factory\openclaw\tmp_render_test\tmp_segments\seg_03.mp4'
+file 'C:\Users\yariv\Desktop\gilad\youtube-ai-factory\openclaw\tmp_render_test\tmp_segments\seg_04.mp4'
+file 'C:\Users\yariv\Desktop\gilad\youtube-ai-factory\openclaw\tmp_render_test\tmp_segments\seg_05.mp4'
