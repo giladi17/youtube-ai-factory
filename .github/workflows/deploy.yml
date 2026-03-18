@@ -1,0 +1,54 @@
+name: Build and Deploy OpenClaw
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Login to DockerHub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build and push Brain image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./brain
+        push: true
+        tags: giladi17/openclaw-brain:latest
+        platforms: linux/amd64,linux/arm64
+
+    - name: Build and push Agent image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./agent
+        push: true
+        tags: giladi17/openclaw-agent:latest
+        platforms: linux/amd64,linux/arm64
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Deploy to Kubernetes via SSH
+      uses: appleboy/ssh-action@v1
+      with:
+        host: ${{ secrets.MASTER_IP }}
+        username: ubuntu
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        script: |
+          sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf rollout restart deployment/openclaw-brain
+          sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf rollout status deployment/openclaw-brain --timeout=120s
+          echo "✅ Deploy complete!"

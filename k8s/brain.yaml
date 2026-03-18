@@ -1,0 +1,16 @@
+# ── REPLACED — Milestone 2 Refactoring ───────────────────────────────────
+#
+# The openclaw-brain Deployment that lived here has been replaced by:
+#   k8s/orchestrator.yaml  → yt-factory-orchestrator Deployment
+#
+# Key differences from the old brain:
+#   - No Telegram bot dependency
+#   - No hard-coded nodeSelector (master node IP removed)
+#   - No Groq LLM routing (Telegram message → agent type)
+#   - HTTP webhook server on :8080 replaces Telegram polling loop
+#   - K8s Job watcher chains pipeline stages (Phase 1→2→3→4)
+#   - Redis usage: pipeline run state, not chat history
+#   - IRSA ServiceAccount (orchestrator-sa) replaces openclaw-secrets injection
+#
+# This file is intentionally empty of resources.
+# ─────────────────────────────────────────────────────────────────────────

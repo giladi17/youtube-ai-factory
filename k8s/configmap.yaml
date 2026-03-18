@@ -1,0 +1,60 @@
+---
+# ── Pipeline configuration ConfigMap ─────────────────────────────────────
+# All agents load these values as environment variables.
+# S3 bucket names are populated from `terraform output` during CI/CD:
+#   terraform output -raw s3_scripts_bucket → S3_SCRIPTS_BUCKET
+#
+# DEPLOYMENT NOTE:
+#   This file is processed through `envsubst` in the CI/CD pipeline before
+#   `kubectl apply`.  Set the following env vars in GitHub Actions:
+#     AWS_ACCOUNT_ID, AWS_REGION, ENVIRONMENT (default: prod)
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pipeline-config
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+data:
+  # AWS config
+  AWS_REGION: "eu-north-1"
+  ENVIRONMENT: "prod"
+
+  # S3 bucket names — substituted at deploy time from Terraform outputs
+  # Format: yt-{stage}-{environment}-{aws_account_id}
+  S3_SCRIPTS_BUCKET:     "yt-scripts-prod-ACCOUNT_ID_PLACEHOLDER"
+  S3_RAW_VIDEO_BUCKET:   "yt-raw-video-prod-ACCOUNT_ID_PLACEHOLDER"
+  S3_ASSETS_BUCKET:      "yt-assets-prod-ACCOUNT_ID_PLACEHOLDER"
+  S3_FINAL_VIDEO_BUCKET: "yt-final-video-prod-ACCOUNT_ID_PLACEHOLDER"
+
+  # AWS Secrets Manager — agents call this directly via IRSA (no K8s secret needed)
+  SECRETS_MANAGER_NAME: "prod/yt-factory/api-keys"
+
+  # Pipeline tuning
+  HEYGEN_POLL_INTERVAL_SEC: "30"
+  HEYGEN_MAX_WAIT_SEC: "1800"
+  YOUTUBE_UPLOAD_CHUNK_SIZE: "10485760"   # 10 MiB resumable upload chunks
+  VIDEO_EDITOR_TARGET_RESOLUTION: "1920x1080"
+  VIDEO_EDITOR_TARGET_FPS: "30"
+
+---
+# ── Same config for the video-editor namespace ───────────────────────────
+# Duplicated because ConfigMaps are namespace-scoped.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pipeline-config
+  namespace: video-editor
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+data:
+  AWS_REGION: "eu-north-1"
+  ENVIRONMENT: "prod"
+  S3_SCRIPTS_BUCKET:     "yt-scripts-prod-ACCOUNT_ID_PLACEHOLDER"
+  S3_RAW_VIDEO_BUCKET:   "yt-raw-video-prod-ACCOUNT_ID_PLACEHOLDER"
+  S3_ASSETS_BUCKET:      "yt-assets-prod-ACCOUNT_ID_PLACEHOLDER"
+  S3_FINAL_VIDEO_BUCKET: "yt-final-video-prod-ACCOUNT_ID_PLACEHOLDER"
+  SECRETS_MANAGER_NAME:  "prod/yt-factory/api-keys"
+  VIDEO_EDITOR_TARGET_RESOLUTION: "1920x1080"
+  VIDEO_EDITOR_TARGET_FPS: "30"

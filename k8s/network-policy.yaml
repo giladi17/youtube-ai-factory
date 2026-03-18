@@ -1,0 +1,220 @@
+# ── NetworkPolicy: YouTube AI Factory ────────────────────────────────────
+#
+# Security model:
+#   • Default-deny all ingress in both namespaces (no pod serves external traffic)
+#   • Default-deny all egress in both namespaces, then whitelist per-agent
+#   • All pods may egress DNS (port 53) to kube-dns
+#   • All agents may egress HTTPS (port 443) — covers S3 VPC endpoint,
+#     AWS Secrets Manager, and external APIs (OpenAI, HeyGen, YouTube)
+#   • Only the orchestrator may reach Redis (port 6379)
+#   • Video editor is isolated: only S3/Secrets via port 443, no Redis
+#
+# Prerequisite: EKS vpc-cni network policy controller must be enabled.
+# Enable via EKS add-on: aws-vpc-cni with ENABLE_NETWORK_POLICY=true
+
+---
+# ── 1. Default-deny all ingress — default namespace ───────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+spec:
+  podSelector: {}        # applies to ALL pods in namespace
+  policyTypes:
+    - Ingress
+  # no ingress rules = deny all ingress
+
+---
+# ── 2. Default-deny all egress — default namespace ────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  # no egress rules = deny all egress (whitelisted by policies below)
+
+---
+# ── 3. Allow DNS egress — all pods in default namespace ───────────────────
+# kube-dns lives in kube-system; agents need it to resolve S3, API endpoints.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+# ── 4. Allow HTTPS egress — all pipeline agents ───────────────────────────
+# Covers: S3 VPC endpoint (routed at AWS level), Secrets Manager VPC endpoint,
+# OpenAI API (scriptwriter, publisher), HeyGen API (avatar director),
+# YouTube Data API v3 (publisher), Google OAuth2 (publisher).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-https-egress
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/part-of
+        operator: In
+        values: ["yt-factory"]
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 443
+          protocol: TCP
+
+---
+# ── 5. Orchestrator → Redis egress ────────────────────────────────────────
+# Only the orchestrator pod writes/reads pipeline state from Redis.
+# All other agents are blocked from Redis — they communicate via S3 only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orchestrator-redis-egress
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+spec:
+  podSelector:
+    matchLabels:
+      app: yt-factory-orchestrator
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - port: 6379
+          protocol: TCP
+
+---
+# ── 6. Redis ingress — only from orchestrator ─────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-ingress-policy
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: yt-factory-orchestrator
+      ports:
+        - port: 6379
+          protocol: TCP
+
+---
+# ── 7. Orchestrator HTTP endpoint — internal cluster ingress only ──────────
+# Allows the pipeline-cronjob trigger pod to POST /run on port 8080.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orchestrator-webhook-ingress
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+spec:
+  podSelector:
+    matchLabels:
+      app: yt-factory-orchestrator
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: yt-factory-trigger
+      ports:
+        - port: 8080
+          protocol: TCP
+
+---
+# ── 8. Default-deny all ingress — video-editor namespace ─────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: video-editor
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+
+---
+# ── 9. Default-deny all egress — video-editor namespace ──────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: video-editor
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+
+---
+# ── 10. Allow DNS + S3/Secrets HTTPS — video-editor namespace ────────────
+# Video editor ONLY needs: DNS, S3 (download inputs, upload output),
+# Secrets Manager (none — no API keys needed for FFmpeg).
+# No access to external AI APIs or YouTube — most isolated agent.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: video-editor-egress
+  namespace: video-editor
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+spec:
+  podSelector:
+    matchLabels:
+      app: yt-factory-video-editor
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - ports:
+        - port: 443
+          protocol: TCP

@@ -1,0 +1,15 @@
+# ── REPLACED — Milestone 2 Refactoring ───────────────────────────────────
+#
+# The openclaw-morning and openclaw-evening CronJobs that lived here
+# have been replaced by:
+#   k8s/pipeline-cronjob.yaml  → yt-factory-pipeline CronJob
+#
+# Key differences from the old CronJobs:
+#   - Single schedule: Mon/Wed/Fri 08:00 UTC (was 5-day stock market hours)
+#   - concurrencyPolicy: Forbid (was unset — allowed overlapping runs)
+#   - Trigger mechanism: POST /run to orchestrator (was direct agent execution)
+#   - Zero financial secrets (Alpaca, Telegram, GROQ all removed)
+#   - curl trigger container (16 MiB) replaces full agent container (was 512 MiB)
+#
+# This file is intentionally empty of resources.
+# ─────────────────────────────────────────────────────────────────────────

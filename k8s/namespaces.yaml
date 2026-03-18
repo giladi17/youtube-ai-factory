@@ -1,0 +1,22 @@
+---
+# ── default namespace — light pipeline agents ─────────────────────────────
+# Already exists in every cluster; labelled here so NetworkPolicy selectors
+# can reference it explicitly by name.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: default
+  labels:
+    app.kubernetes.io/part-of: yt-factory
+
+---
+# ── video-editor namespace — isolated heavy rendering job ─────────────────
+# Runs on Karpenter-provisioned c5.2xlarge nodes (tainted workload=video-editor).
+# Kept separate so its large ResourceQuota and taint-based scheduling don't
+# interfere with the light agents in the default namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: video-editor
+  labels:
+    app.kubernetes.io/part-of: yt-factory

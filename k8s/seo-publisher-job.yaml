@@ -1,0 +1,80 @@
+---
+# ── Agent 4: SEO Publisher Job Template ──────────────────────────────────
+#
+# Responsibilities:
+#   1. Download script.json from s3://yt-scripts-{env}/{RUN_ID}/script.json
+#   2. Download final.mp4 from s3://yt-final-video-{env}/{RUN_ID}/final.mp4
+#   3. Call OpenAI GPT-4o to generate:
+#        - Clickbait title (≤ 70 chars)
+#        - SEO description (≤ 5000 chars with timestamps and keywords)
+#        - Tag list (≤ 500 chars total, comma-separated)
+#   4. Exchange YOUTUBE_REFRESH_TOKEN for a fresh access token via OAuth2
+#   5. Upload video using YouTube Data API v3 videos.insert (resumable upload)
+#      in YOUTUBE_UPLOAD_CHUNK_SIZE chunks
+#   6. Set metadata: title, description, tags, categoryId=28 (Science & Tech),
+#      privacyStatus=public
+#   7. Report live YouTube URL → Redis: run:{RUN_ID}:result = "https://youtu.be/..."
+#   8. Exit 0
+#
+# API credentials: fetched at runtime via IRSA → Secrets Manager
+#   (OPENAI_API_KEY, YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN)
+#
+# YouTube upload note: a 1080p 10-min video is ~500 MiB — allow 15 min for upload
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seo-publisher-RUNID_PLACEHOLDER
+  namespace: default
+  labels:
+    app: yt-factory-seo-publisher
+    app.kubernetes.io/part-of: yt-factory
+    app.kubernetes.io/component: agent
+    pipeline-stage: "4-seo-publisher"
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 1
+
+  # 20-min ceiling: GPT-4o call (~30s) + YouTube upload (~15 min for 500 MiB)
+  activeDeadlineSeconds: 1800
+
+  template:
+    metadata:
+      labels:
+        app: yt-factory-seo-publisher
+        app.kubernetes.io/part-of: yt-factory
+    spec:
+      restartPolicy: Never
+      serviceAccountName: publisher-sa
+      imagePullSecrets:
+        - name: dockerhub-secret
+
+      nodeSelector:
+        node.kubernetes.io/pool: light-agents
+
+      containers:
+        - name: seo-publisher
+          image: giladi17/yt-factory-seo-publisher:latest
+          imagePullPolicy: Always
+
+          envFrom:
+            - configMapRef:
+                name: pipeline-config
+
+          env:
+            - name: RUN_ID
+              value: "RUNID_PLACEHOLDER"
+            - name: ROLE
+              value: "seo_publisher"
+            - name: TASK
+              value: "publish_to_youtube"
+
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              # Extra memory headroom: the publisher streams the MP4 file
+              # from S3 to YouTube without fully buffering it, but the chunk
+              # buffer (10 MiB) + Python overhead warrants 1 GiB limit
+              memory: "1Gi"
+              cpu: "500m"
