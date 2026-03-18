@@ -177,11 +177,95 @@ elif not font_hint.exists():
 else:
     print("[info] assets/fonts/ ready - add NotoSansHebrew-Regular.ttf for RTL subtitles")
 
+# ── 5. test_input.json  (mock script matching Elite Scriptwriter schema) ───────
+test_json = ROOT / "test_input.json"
+if test_json.exists():
+    print(f"[skip] {test_json.name} already exists")
+else:
+    mock_script = {
+        "run_id": "test-run-001",
+        "title": "GPT-5 Changes EVERYTHING",
+        "thumbnail_idea": "Split screen: robot hand shaking human hand, neon glow, text 'The End of Jobs?' overlaid",
+        "hooks": [
+            {
+                "type": "curiosity_gap",
+                "text": "What if I told you the AI model released this week can replace 80% of knowledge workers — and most people have no idea it exists yet?"
+            },
+            {
+                "type": "fomo",
+                "text": "Every tech company is quietly re-hiring right now because of one AI model drop. If you're not watching this, you're already behind."
+            },
+            {
+                "type": "big_reveal",
+                "text": "OpenAI just shipped something they didn't announce on stage. And it's already running inside Fortune 500 companies."
+            }
+        ],
+        "body": [
+            {
+                "segment": "hook",
+                "title": "The Drop Nobody Talked About",
+                "text": "Three days ago OpenAI pushed a silent update to their API. No press release. No tweet storm. Just a changelog entry that most developers scrolled past.",
+                "visual_cue": "Show OpenAI developer dashboard with a subtle changelog notification highlighted in red",
+                "tone": "[FAST]",
+                "duration_sec": 12
+            },
+            {
+                "segment": "context",
+                "title": "Why This Is Different",
+                "text": "Every six months we get a new model and everyone says it changes everything. This time the benchmark numbers are not the story. The story is the price drop. GPT-4 level reasoning now costs ninety-five percent less than it did in 2023.",
+                "visual_cue": "Animated bar chart showing cost-per-million-tokens dropping from 2023 to today",
+                "tone": "[DRAMATIC PAUSE]",
+                "duration_sec": 18
+            },
+            {
+                "segment": "proof",
+                "title": "Real Companies, Real Numbers",
+                "text": "I pulled the financials. Klarna replaced seven hundred customer service agents. Duolingo cut their contractor headcount by fifty percent. These are not startups — these are companies with billions in revenue making hard decisions fast.",
+                "visual_cue": "Show Klarna and Duolingo logos side by side with workforce reduction percentages",
+                "tone": "[SLOW]",
+                "duration_sec": 20
+            },
+            {
+                "segment": "implication",
+                "title": "Who Gets Hit First",
+                "text": "The jobs at risk are not the ones you expect. It is not factory workers. It is paralegals, junior analysts, content writers, tier-one support. Basically anyone whose job is to read something and produce a structured output.",
+                "visual_cue": "Show a blurred org chart with certain roles fading out, replaced by an AI node",
+                "tone": "[ENERGETIC]",
+                "duration_sec": 16
+            },
+            {
+                "segment": "opportunity",
+                "title": "The Other Side of the Trade",
+                "text": "But here is the thing nobody is saying loudly enough. Every wave of automation creates more jobs than it destroys — eventually. The question is whether you are positioned on the creation side or the destruction side of that curve.",
+                "visual_cue": "Show a wave graphic with a surfer on top, label reads 'Early movers'",
+                "tone": "[CALM]",
+                "duration_sec": 18
+            },
+            {
+                "segment": "cta_bridge",
+                "title": "What You Should Do This Week",
+                "text": "Pick one repetitive task in your workflow. Could be writing reports, summarising emails, triaging tickets. Automate it with the API this weekend. Not because your job is at risk right now. Because the muscle memory of building with AI is the actual skill that compounds.",
+                "visual_cue": "Screen recording of a simple Python script calling the OpenAI API, output appears in terminal",
+                "tone": "[FAST]",
+                "duration_sec": 22
+            }
+        ],
+        "cta": "If this hit different, subscribe and hit the bell — I drop one deep-dive every week on AI moves that actually matter. Link to the free API starter kit is in the description.",
+        "keywords": ["OpenAI", "GPT-5", "AI jobs", "automation 2025", "future of work"],
+        "duration_est_sec": 106
+    }
+    test_json.write_text(
+        __import__("json").dumps(mock_script, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"  + Created {test_json.name} (6 body segments, 106s total)")
+
 # ── Summary ────────────────────────────────────────────────────────────────────
 print("\nDone! Lab assets ready:")
 print(f"   {ROOT / 'avatar_input.mp4'}")
 print(f"   {music_out}")
 print(f"   {broll_out}")
+print(f"   {test_json}")
 print(f"   {FONTS_DIR}  (drop NotoSansHebrew-Regular.ttf here for Hebrew subs)")
 print(f"   {OUTPUTS}    (rendered videos will appear here)")
 if not FFMPEG:

@@ -114,22 +114,35 @@ def _upload(local_path: Path, bucket: str, key: str) -> None:
 
 def _detect_hw_encoder() -> tuple[str, list[str]]:
     """
-    Probe available FFmpeg encoders and return the fastest available option.
+    Probe available FFmpeg encoders and return the fastest usable option.
     Priority: NVENC (NVIDIA) → AMF (AMD) → libx264 (CPU fallback).
+
+    Each candidate is verified with a real 1-frame test encode so that
+    encoders listed by FFmpeg but unsupported at runtime (e.g. h264_nvenc
+    without nvcuda.dll) are automatically skipped.
     """
-    try:
-        result = subprocess.run(
-            ["ffmpeg", "-encoders", "-hide_banner"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if "h264_nvenc" in result.stdout:
-            logger.info("Hardware encoder: h264_nvenc (NVIDIA)")
-            return "h264_nvenc", ["-preset", "p4", "-rc", "vbr", "-cq", "22", "-b:v", "0"]
-        if "h264_amf" in result.stdout:
-            logger.info("Hardware encoder: h264_amf (AMD)")
-            return "h264_amf", ["-quality", "balanced", "-rc", "vbr_latency", "-qp_i", "22"]
-    except Exception as exc:
-        logger.warning(f"Encoder probe failed: {exc}")
+    candidates = [
+        ("h264_nvenc", ["-preset", "p4", "-rc", "vbr", "-cq", "22", "-b:v", "0"]),
+        ("h264_amf",   ["-quality", "balanced", "-rc", "vbr_latency", "-qp_i", "22"]),
+    ]
+    for codec, args in candidates:
+        try:
+            probe = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "nullsrc=size=128x72:rate=1",
+                    "-t", "0.1",
+                    "-c:v", codec, *args,
+                    "-f", "null", "-",
+                ],
+                capture_output=True, text=True, timeout=15,
+            )
+            if probe.returncode == 0:
+                logger.info(f"Hardware encoder: {codec}")
+                return codec, args
+            logger.debug(f"{codec} unavailable: {probe.stderr[-200:]}")
+        except Exception as exc:
+            logger.debug(f"{codec} probe error: {exc}")
     logger.info("Hardware encoder: libx264 (CPU fallback)")
     return "libx264", ["-preset", "medium", "-crf", "22"]
 
