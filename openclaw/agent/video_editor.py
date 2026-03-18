@@ -3,40 +3,38 @@ Agent 3: Elite Video Editor  ★ HEAVY ★
 ========================================
 Runs on a Karpenter-provisioned c5.2xlarge node (tainted: workload=video-editor:NoSchedule).
 
+Asset resolution order (local-first, S3 fallback):
+  assets/background_music/   — ambient music track
+  assets/b-roll/             — keyword-matched clips (e.g. openai.mp4 for "OpenAI" cues)
+  assets/fonts/              — Hebrew/RTL font for libass subtitle rendering
+  assets/overlays/           — optional static overlays
+
 Pipeline:
-  1. Download inputs from S3
+  1. Download primary inputs from S3
        - avatar.mp4       (green-screen from HeyGen)
        - script.json      (body[] with visual_cue, tone, duration_sec per segment)
-       - background.*     (main backdrop image)
-       - music.mp3        (background track)
-       - broll assets     (per-segment, matched by visual_cue keywords against S3 filenames)
-
-  2. Asset mapping
-       - Extract keywords from each segment's visual_cue
-       - Score-match against s3://yt-assets/broll/* filenames
-       - Download best match; fall back to looped background
-
+  2. Resolve assets  (local assets/ → S3 fallback)
+       - background music from assets/background_music/
+       - b-roll per segment: keyword match visual_cue → assets/b-roll/<keyword>.*
+       - Hebrew font from assets/fonts/ for RTL subtitles
   3. Pass 1 — B-roll timeline (FFmpeg concat)
        - Trim/loop each b-roll clip to segment's duration_sec
        - Apply pacing effect based on tone cue:
-           [FAST]            → setpts=0.85*PTS  (slight speed-up)
-           [SLOW]            → setpts=1.20*PTS  (slow-down)
+           [FAST]            → setpts=0.85*PTS
+           [SLOW]            → setpts=1.20*PTS
            [DRAMATIC PAUSE]  → 1.5s freeze prepended
            [ENERGETIC]       → subtle zoom-in via zoompan
            [CALM]            → no effect
-       - Output: broll_timeline.mp4
-
-  4. Pass 2 — Final composite (FFmpeg complex filtergraph)
+  4. Pass 2 — Final composite
        a. Chromakey avatar  (#00B140 green screen removal)
        b. Overlay keyed avatar over b-roll timeline
        c. Auto-duck music under voice via sidechaincompress
-       d. Burn SRT subtitles with libass (timed from segment durations)
-       e. Segment title cards via drawtext (first 2.5s of each segment)
+       d. Burn SRT subtitles with libass + Hebrew RTL font
+       e. Segment title cards via drawtext
        f. Hardware-accelerated encode: NVENC → AMF → libx264 fallback
-       Output: final.mp4
-
-  5. Upload final.mp4 → s3://yt-final-video/{RUN_ID}/final.mp4
-  6. Update Redis: run:{RUN_ID}:stage = "video_ready"
+  5. Save to outputs/{RUN_ID}.mp4  (local)
+  6. Upload → s3://yt-final-video/{RUN_ID}/final.mp4
+  7. Update Redis: run:{RUN_ID}:stage = "video_ready"
 """
 import json
 import logging
@@ -57,12 +55,23 @@ logger = logging.getLogger(__name__)
 RUN_ID                = os.environ["RUN_ID"]
 S3_SCRIPTS_BUCKET     = os.environ["S3_SCRIPTS_BUCKET"]
 S3_RAW_VIDEO_BUCKET   = os.environ["S3_RAW_VIDEO_BUCKET"]
-S3_ASSETS_BUCKET      = os.environ["S3_ASSETS_BUCKET"]
+S3_ASSETS_BUCKET      = os.environ.get("S3_ASSETS_BUCKET", "")
 S3_FINAL_VIDEO_BUCKET = os.environ["S3_FINAL_VIDEO_BUCKET"]
 AWS_REGION            = os.environ.get("AWS_REGION", "eu-north-1")
 REDIS_HOST            = os.environ.get("REDIS_HOST", "redis-service")
 RESOLUTION            = os.environ.get("VIDEO_EDITOR_TARGET_RESOLUTION", "1920x1080")
 FPS                   = os.environ.get("VIDEO_EDITOR_TARGET_FPS", "30")
+
+# Local asset directories (override with ASSETS_BASE env var for K8s volume mounts)
+_HERE        = Path(__file__).resolve().parent
+ASSETS_BASE  = Path(os.environ.get("ASSETS_BASE", str(_HERE.parent / "assets")))
+MUSIC_DIR    = ASSETS_BASE / "background_music"
+BROLL_DIR    = ASSETS_BASE / "b-roll"
+FONTS_DIR    = ASSETS_BASE / "fonts"
+OVERLAYS_DIR = ASSETS_BASE / "overlays"
+
+# Rendered outputs land here (local) before S3 upload
+OUTPUTS_DIR = Path(os.environ.get("OUTPUTS_DIR", str(_HERE.parent / "outputs")))
 
 WORKSPACE = Path("/tmp/render")
 WIDTH, HEIGHT = map(int, RESOLUTION.split("x"))
@@ -130,91 +139,158 @@ def _detect_hw_encoder() -> tuple[str, list[str]]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_background() -> Optional[Path]:
-    keys = _list_prefix(S3_ASSETS_BUCKET, "backgrounds/")
-    image_keys = [k for k in keys if k.lower().endswith((".png", ".jpg", ".jpeg"))]
-    if not image_keys:
-        logger.warning("No backgrounds found — using colour fallback")
-        return None
-    dest = WORKSPACE / "background" / Path(image_keys[0]).name
-    return _download(S3_ASSETS_BUCKET, image_keys[0], dest)
+    # Background images live in assets/b-roll/ root or assets/overlays/
+    for search_dir in (OVERLAYS_DIR, BROLL_DIR):
+        if search_dir.exists():
+            candidates = [
+                p for p in search_dir.iterdir()
+                if p.suffix.lower() in {".png", ".jpg", ".jpeg"}
+                and "background" in p.stem.lower()
+            ]
+            if candidates:
+                logger.info(f"Background: {candidates[0]}")
+                return candidates[0]
+    # S3 fallback
+    if S3_ASSETS_BUCKET:
+        keys = _list_prefix(S3_ASSETS_BUCKET, "backgrounds/")
+        image_keys = [k for k in keys if k.lower().endswith((".png", ".jpg", ".jpeg"))]
+        if image_keys:
+            dest = WORKSPACE / "background" / Path(image_keys[0]).name
+            return _download(S3_ASSETS_BUCKET, image_keys[0], dest)
+    logger.warning("No background found — using dark colour fallback")
+    return None
 
 
 def _get_music() -> Optional[Path]:
-    keys = _list_prefix(S3_ASSETS_BUCKET, "music/")
-    mp3_keys = [k for k in keys if k.lower().endswith(".mp3")]
-    if not mp3_keys:
-        logger.warning("No music found — output will be voice-only")
-        return None
-    key = random.choice(mp3_keys)
-    dest = WORKSPACE / "music" / Path(key).name
-    return _download(S3_ASSETS_BUCKET, key, dest)
+    """
+    Scan assets/background_music/ for any audio file.
+    Falls back to S3 assets/music/ if local dir is empty.
+    """
+    audio_exts = {".mp3", ".wav", ".aac", ".m4a", ".ogg"}
+    if MUSIC_DIR.exists():
+        tracks = [p for p in MUSIC_DIR.iterdir() if p.suffix.lower() in audio_exts]
+        if tracks:
+            chosen = random.choice(tracks)
+            logger.info(f"Music (local): {chosen.name}")
+            return chosen
+    # S3 fallback
+    if S3_ASSETS_BUCKET:
+        keys = _list_prefix(S3_ASSETS_BUCKET, "music/")
+        mp3_keys = [k for k in keys if k.lower().endswith((".mp3", ".wav", ".aac"))]
+        if mp3_keys:
+            key  = random.choice(mp3_keys)
+            dest = WORKSPACE / "music" / Path(key).name
+            return _download(S3_ASSETS_BUCKET, key, dest)
+    logger.warning("No music found — output will be voice-only")
+    return None
+
+
+def _get_font() -> Optional[Path]:
+    """
+    Return the first font file found in assets/fonts/.
+    Used for Hebrew RTL subtitle rendering via libass fontsdir.
+    """
+    font_exts = {".ttf", ".otf", ".woff", ".woff2"}
+    if FONTS_DIR.exists():
+        fonts = [p for p in FONTS_DIR.iterdir() if p.suffix.lower() in font_exts]
+        if fonts:
+            logger.info(f"Font (local): {fonts[0].name}")
+            return fonts[0]
+    logger.warning("No font found in assets/fonts/ — libass will use system default")
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Visual cue → B-roll asset mapping
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_asset_index(bucket: str, prefix: str = "broll/") -> dict[str, str]:
+_MEDIA_EXTS = {".mp4", ".mov", ".webm", ".jpg", ".jpeg", ".png"}
+
+
+def _build_local_asset_index() -> dict[str, Path]:
     """
-    Returns {normalised_filename: s3_key} for all video assets under prefix.
-    Supports .mp4, .mov, .webm, .jpg, .png (stills become short loops).
+    Scan assets/b-roll/ and return {normalised_stem: local_path}.
+    Stem is lowercased with hyphens/underscores replaced by spaces.
+    Example: "openai_demo.mp4" → key "openai demo"
     """
-    keys = _list_prefix(bucket, prefix)
-    video_exts = {".mp4", ".mov", ".webm", ".jpg", ".jpeg", ".png"}
-    index = {}
-    for k in keys:
-        ext = Path(k).suffix.lower()
-        if ext in video_exts:
-            stem = Path(k).stem.lower().replace("-", " ").replace("_", " ")
-            index[stem] = k
+    index: dict[str, Path] = {}
+    if not BROLL_DIR.exists():
+        return index
+    for p in BROLL_DIR.iterdir():
+        if p.suffix.lower() in _MEDIA_EXTS:
+            stem = p.stem.lower().replace("-", " ").replace("_", " ")
+            index[stem] = p
+    logger.info(f"Local b-roll index: {len(index)} assets in {BROLL_DIR}")
     return index
 
 
-def _asset_mapper(visual_cue: str, asset_index: dict[str, str]) -> Optional[str]:
+def _build_s3_asset_index() -> dict[str, str]:
+    """S3 fallback index: {normalised_stem: s3_key}."""
+    if not S3_ASSETS_BUCKET:
+        return {}
+    keys = _list_prefix(S3_ASSETS_BUCKET, "broll/")
+    return {
+        Path(k).stem.lower().replace("-", " ").replace("_", " "): k
+        for k in keys if Path(k).suffix.lower() in _MEDIA_EXTS
+    }
+
+
+def _asset_mapper(visual_cue: str, local_index: dict[str, Path],
+                  s3_index: dict[str, str]) -> Optional[Path]:
     """
-    Score-based keyword match between visual_cue text and asset filenames.
-    Returns the S3 key of the best match, or None if no meaningful overlap.
+    Score-based keyword match: visual_cue text vs asset filename stems.
+    Checks local assets first; S3 index as fallback.
+
+    Special case: if the cue contains a brand keyword that exactly matches
+    a filename stem (e.g. 'OpenAI' → stem 'openai'), that wins outright.
+    Returns a local Path (already downloaded if from S3), or None.
     """
-    # Extract meaningful words (≥4 chars) from the cue
-    cue_words = set(re.findall(r"\b\w{4,}\b", visual_cue.lower()))
-    best_key, best_score = None, 0
+    cue_words = set(re.findall(r"\b\w{3,}\b", visual_cue.lower()))
 
-    for filename_stem, s3_key in asset_index.items():
-        asset_words = set(re.findall(r"\b\w{4,}\b", filename_stem))
-        score = len(cue_words & asset_words)
-        if score > best_score:
-            best_score, best_key = score, s3_key
+    def _score(stem: str) -> int:
+        stem_words = set(re.findall(r"\b\w{3,}\b", stem))
+        return len(cue_words & stem_words)
 
-    if best_score > 0:
-        logger.info(f"Asset match (score={best_score}): '{visual_cue[:60]}...' → {best_key}")
-    return best_key if best_score > 0 else None
+    # Local lookup
+    best_local = max(local_index.keys(), key=_score, default=None)
+    local_score = _score(best_local) if best_local else 0
+
+    if local_score > 0:
+        path = local_index[best_local]
+        logger.info(f"B-roll match (local, score={local_score}): "
+                    f"'{visual_cue[:55]}' → {path.name}")
+        return path
+
+    # S3 fallback
+    best_s3 = max(s3_index.keys(), key=_score, default=None)
+    s3_score = _score(best_s3) if best_s3 else 0
+
+    if s3_score > 0:
+        s3_key = s3_index[best_s3]
+        dest   = WORKSPACE / "broll" / Path(s3_key).name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _download(S3_ASSETS_BUCKET, s3_key, dest)
+            logger.info(f"B-roll match (S3, score={s3_score}): "
+                        f"'{visual_cue[:55]}' → {s3_key}")
+            return dest
+        except Exception as exc:
+            logger.warning(f"S3 b-roll download failed for '{s3_key}': {exc}")
+
+    logger.info(f"No b-roll match for: '{visual_cue[:55]}'")
+    return None
 
 
-def _download_broll_assets(
+def _resolve_broll_assets(
     body: list[dict],
-    asset_index: dict[str, str],
+    local_index: dict[str, Path],
+    s3_index: dict[str, str],
 ) -> dict[int, Optional[Path]]:
-    """Download the best-matching b-roll for each segment. Returns {seg_idx: Path|None}."""
-    result: dict[int, Optional[Path]] = {}
-    broll_dir = WORKSPACE / "broll"
-    broll_dir.mkdir(parents=True, exist_ok=True)
-
-    for i, seg in enumerate(body):
-        visual_cue = seg.get("visual_cue", "")
-        s3_key = _asset_mapper(visual_cue, asset_index)
-        if s3_key:
-            dest = broll_dir / f"seg_{i:02d}_{Path(s3_key).name}"
-            try:
-                _download(S3_ASSETS_BUCKET, s3_key, dest)
-                result[i] = dest
-            except Exception as exc:
-                logger.warning(f"Segment {i} b-roll download failed: {exc}")
-                result[i] = None
-        else:
-            logger.info(f"Segment {i}: no b-roll match for cue '{visual_cue[:50]}...'")
-            result[i] = None
-
-    return result
+    """Map each segment index → resolved local Path (or None)."""
+    return {
+        i: _asset_mapper(seg.get("visual_cue", ""), local_index, s3_index)
+        for i, seg in enumerate(body)
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -349,6 +425,40 @@ def _render_broll_timeline(
 # Pass 2 — Final composite
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _build_subtitle_filter(srt_escaped: str, font: Optional[Path]) -> str:
+    """
+    Build the libass subtitles filter string.
+    When a font is provided (Hebrew/RTL support):
+      - fontsdir points to assets/fonts/
+      - FontName is set to the stem of the font file
+      - Direction is not a libass ASS style option; RTL is handled automatically
+        by the Unicode BiDi algorithm inside libass when the font covers Hebrew glyphs.
+    """
+    font_size = max(20, WIDTH // 80)
+    base_style = (
+        f"FontSize={font_size},"
+        f"PrimaryColour=&H00FFFFFF,"
+        f"OutlineColour=&H00000000,"
+        f"Outline=2,Shadow=1,MarginV=40,"
+        f"Alignment=2"          # bottom-center
+    )
+    if font:
+        font_name   = font.stem
+        fonts_dir   = str(font.parent).replace("\\", "/")
+        style       = f"{base_style},FontName={font_name}"
+        sub_filter  = (
+            f"[composed] subtitles='{srt_escaped}'"
+            f":fontsdir='{fonts_dir}'"
+            f":force_style='{style}' [subbed];"
+        )
+    else:
+        sub_filter = (
+            f"[composed] subtitles='{srt_escaped}'"
+            f":force_style='{base_style}' [subbed];"
+        )
+    return sub_filter
+
+
 def _build_drawtext_chain(body: list[dict]) -> str:
     """
     Build a chained drawtext filter string that renders each segment's title
@@ -380,12 +490,13 @@ def _render_final(
     output: Path,
     codec: str,
     codec_args: list[str],
+    font: Optional[Path] = None,
 ) -> None:
     """
     Full composite:
       - avatar chromakey overlay on b-roll timeline
       - auto-ducking music via sidechaincompress
-      - subtitle burn-in (libass)
+      - subtitle burn-in (libass) with optional Hebrew RTL font
       - segment title cards (drawtext)
       - hardware-accelerated encode
     """
@@ -407,18 +518,12 @@ def _render_final(
         f"[0:v] chromakey=0x00B140:0.3:0.05,"
         f"scale={AVATAR_W}:{AVATAR_H}:force_original_aspect_ratio=decrease,"
         f"pad={AVATAR_W}:{AVATAR_H}:(ow-iw)/2:(oh-ih)/2,setsar=1 [keyed];"
-
         # Overlay keyed avatar on b-roll timeline
         f"[1:v][keyed] overlay={AVATAR_X}:{AVATAR_Y} [composed];"
-
-        # Subtitle burn-in
-        f"[composed] subtitles='{srt_escaped}'"
-        f":force_style='FontSize={max(20, WIDTH // 80)},"
-        f"PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-        f"Outline=2,Shadow=1,MarginV=40' [subbed];"
-
+        # Subtitle burn-in (Hebrew RTL: fontsdir + libass BiDi)
+        + _build_subtitle_filter(srt_escaped, font)
         # Title cards per segment
-        f"[subbed] {drawtext} [video_out];"
+        + f"[subbed] {drawtext} [video_out];"
     )
 
     # ── Audio chain (auto-ducking) ───────────────────────────────────────────
@@ -493,17 +598,27 @@ def _update_redis(stage: str) -> None:
 def run() -> None:
     logger.info(f"Elite Video Editor starting | run_id={RUN_ID} | {RESOLUTION}@{FPS}fps")
     WORKSPACE.mkdir(parents=True, exist_ok=True)
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── 1. Detect hardware encoder ────────────────────────────────────────────
     codec, codec_args = _detect_hw_encoder()
 
-    # ── 2. Download primary inputs ────────────────────────────────────────────
+    # ── 2. Download primary inputs from S3 ───────────────────────────────────
     avatar_path = _download(S3_RAW_VIDEO_BUCKET, f"{RUN_ID}/avatar.mp4",  WORKSPACE / "avatar.mp4")
     script_path = _download(S3_SCRIPTS_BUCKET,   f"{RUN_ID}/script.json", WORKSPACE / "script.json")
-    background  = _get_background()
-    music       = _get_music()
 
-    # ── 3. Parse script ───────────────────────────────────────────────────────
+    # ── 3. Resolve assets (local-first, S3 fallback) ─────────────────────────
+    background = _get_background()
+    music      = _get_music()
+    font       = _get_font()
+
+    logger.info(
+        f"Assets resolved | music={'✓' if music else '✗'} "
+        f"background={'✓' if background else '✗ (colour fallback)'} "
+        f"font={'✓ ' + font.name if font else '✗ (system default)'}"
+    )
+
+    # ── 4. Parse script ───────────────────────────────────────────────────────
     with open(script_path, encoding="utf-8") as f:
         script = json.load(f)
 
@@ -511,52 +626,55 @@ def run() -> None:
     if not body:
         raise ValueError("script.json missing 'body' segments")
 
-    voiceover_text = script.get("voiceover_text", "")
-    if not voiceover_text:
-        # Build from body segments as fallback
-        voiceover_text = " ".join(seg.get("text", "") for seg in body)
+    logger.info(
+        f"Script loaded | segments={len(body)} | "
+        f"total_duration={sum(s.get('duration_sec', 60) for s in body):.0f}s"
+    )
 
-    logger.info(f"Script loaded | segments={len(body)} | "
-                f"total_duration={sum(s.get('duration_sec', 60) for s in body):.0f}s")
-
-    # ── 4. Asset mapping — download b-roll per segment ────────────────────────
-    asset_index = _build_asset_index(S3_ASSETS_BUCKET, prefix="broll/")
-    logger.info(f"Asset index: {len(asset_index)} b-roll items in S3")
-    broll_map = _download_broll_assets(body, asset_index)
-    matched = sum(1 for v in broll_map.values() if v is not None)
+    # ── 5. B-roll asset mapping ───────────────────────────────────────────────
+    local_index = _build_local_asset_index()
+    s3_index    = _build_s3_asset_index()
+    broll_map   = _resolve_broll_assets(body, local_index, s3_index)
+    matched     = sum(1 for v in broll_map.values() if v is not None)
     logger.info(f"B-roll coverage: {matched}/{len(body)} segments matched")
 
-    # ── 5. Generate subtitles (segment-accurate timing) ───────────────────────
+    # ── 6. Generate subtitles (segment-accurate timing) ───────────────────────
     srt_content = _generate_srt(body)
     srt_path    = WORKSPACE / "subtitles.srt"
     srt_path.write_text(srt_content, encoding="utf-8")
-    logger.info(f"SRT generated ({srt_content.count('-->') } entries)")
+    logger.info(f"SRT generated ({srt_content.count('-->')} entries)")
 
-    # ── 6. Pass 1: Build b-roll timeline ──────────────────────────────────────
+    # ── 7. Pass 1: Build b-roll timeline ─────────────────────────────────────
     broll_timeline = WORKSPACE / "broll_timeline.mp4"
     _render_broll_timeline(body, broll_map, background, broll_timeline)
 
-    # ── 7. Pass 2: Final composite ────────────────────────────────────────────
-    output_path = WORKSPACE / "final.mp4"
+    # ── 8. Pass 2: Final composite ────────────────────────────────────────────
+    tmp_output = WORKSPACE / "final.mp4"
     _render_final(
         avatar         = avatar_path,
         broll_timeline = broll_timeline,
         music          = music,
         srt            = srt_path,
         body           = body,
-        output         = output_path,
+        output         = tmp_output,
         codec          = codec,
         codec_args     = codec_args,
+        font           = font,
     )
 
-    if not output_path.exists() or output_path.stat().st_size < 50_000:
-        raise RuntimeError(f"Output missing or too small: {output_path.stat().st_size} bytes")
+    if not tmp_output.exists() or tmp_output.stat().st_size < 50_000:
+        raise RuntimeError(f"Output missing or too small: {tmp_output.stat().st_size} bytes")
 
-    size_mib = output_path.stat().st_size / (1024 * 1024)
-    logger.info(f"Final video: {output_path} ({size_mib:.1f} MiB)")
+    size_mib = tmp_output.stat().st_size / (1024 * 1024)
 
-    # ── 8. Upload & update Redis ──────────────────────────────────────────────
-    _upload(output_path, S3_FINAL_VIDEO_BUCKET, f"{RUN_ID}/final.mp4")
+    # ── 9. Copy to outputs/ ───────────────────────────────────────────────────
+    final_local = OUTPUTS_DIR / f"{RUN_ID}.mp4"
+    import shutil
+    shutil.copy2(tmp_output, final_local)
+    logger.info(f"Saved locally → {final_local} ({size_mib:.1f} MiB)")
+
+    # ── 10. Upload to S3 & update Redis ──────────────────────────────────────
+    _upload(tmp_output, S3_FINAL_VIDEO_BUCKET, f"{RUN_ID}/final.mp4")
     _update_redis("video_ready")
 
     logger.info(f"Elite Video Editor done | run_id={RUN_ID} | {size_mib:.1f} MiB")
