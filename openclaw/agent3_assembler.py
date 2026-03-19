@@ -163,11 +163,18 @@ def _ffmpeg(args: list[str], label: str) -> None:
 
 
 def _get_duration(path: Path) -> float:
+    """Get media duration using ffmpeg (avoids ffprobe which may be blocked)."""
     r = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(path)],
+        ["ffmpeg", "-i", str(path), "-f", "null", "-"],
         capture_output=True, text=True,
     )
-    return float(json.loads(r.stdout)["format"]["duration"])
+    # Parse "Duration: HH:MM:SS.ss" from stderr
+    for line in r.stderr.splitlines():
+        if "Duration:" in line:
+            dur_str = line.split("Duration:")[1].split(",")[0].strip()  # "HH:MM:SS.ss"
+            h, m, s = dur_str.split(":")
+            return float(h) * 3600 + float(m) * 60 + float(s)
+    raise RuntimeError(f"Could not determine duration of {path}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -504,13 +511,13 @@ def _composite(
     if sfx_idx is not None:
         sfx_chain, sfx_label = _build_sfx_chain(sfx_idx, transition_ms)
 
-    # Futuristic color grade: boost saturation, push blue/purple channel, vignette
+    # Futuristic color grade: boost saturation, push blue gamma, cinematic vignette
+    # Uses universally-supported FFmpeg filters (eq + hue + vignette)
     video_chain = (
         "[0:v] "
-        "hue=s=1.35,"                              # saturate neon colors
-        "colorbalance=bs=0.12:ms=0.06:hs=0.04,"   # push blue in shadows/mids
-        "curves=blue='0/0 0.5/0.58 1/1',"         # lift blue curve (cyberpunk tint)
-        "vignette=PI/5"                            # cinematic vignette
+        "hue=s=1.35,"                                        # saturate neon colors
+        "eq=saturation=1.2:gamma_b=1.18:contrast=1.04,"     # lift blue channel → cyberpunk tint
+        "vignette=PI/5"                                      # cinematic vignette
         " [video_out];"
     )
 
