@@ -65,12 +65,20 @@ CROSSFADE_DUR  = 0.5          # seconds of blend between clips
 
 # ── Feature: DALL-E 3 ─────────────────────────────────────────────────────────
 DALLE_STYLE    = (
-    "Cinematic lighting, hyper-realistic, highly detailed, 8k resolution, "
-    "dramatic composition, no text, no watermark, widescreen 16:9"
+    "Futuristic high-tech cyberpunk aesthetic, glowing holographic user interface, "
+    "neon blue and purple color palette, data streams and particle effects, "
+    "dark background with volumetric light rays, cinematic lighting, "
+    "hyper-realistic, highly detailed, 8k resolution, "
+    "no text, no watermark, widescreen 16:9"
 )
 DALLE_SIZE     = "1792x1024"  # native 16:9 from DALL-E 3
 DALLE_QUALITY  = "hd"
 DALLE_RETRY    = 3            # retries on rate-limit
+
+# ── Feature: Digital Glitch transitions ───────────────────────────────────────
+# Alternates between pixelize (data corruption) and horzopen (scanner wipe)
+# for a varied futuristic look on every cut
+GLITCH_TRANSITIONS = ["pixelize", "horzopen", "pixelize", "diagtl", "pixelize", "wipeleft"]
 
 # ── Feature: audio ducking ─────────────────────────────────────────────────────
 DUCK_THRESHOLD = "-24dB"
@@ -276,18 +284,25 @@ def _find_or_generate_sfx(tmpdir: Path) -> Optional[Path]:
                 log.info(f"SFX: {f.name}")
                 return f
 
-    log.info("SFX: generating synthetic whoosh (add assets/sfx/whoosh.mp3 to customise)")
+    log.info("SFX: generating digital glitch beep (add assets/sfx/glitch.mp3 to customise)")
     SFX_DIR.mkdir(parents=True, exist_ok=True)
-    out  = tmpdir / "whoosh_gen.mp3"
-    expr = "0.4*sin(2*PI*(300*t+750*t*t))*sin(PI*t/0.4)"
+    out  = tmpdir / "glitch_gen.mp3"
+    # 880Hz + 1320Hz layered sine waves → sci-fi double-beep with fast decay
+    expr = "0.45*(sin(2*PI*880*t)+0.6*sin(2*PI*1320*t))*exp(-28*t)"
     _ffmpeg([
         "-f", "lavfi",
         "-i", f"aevalsrc='{expr}:s=44100:c=stereo'",
-        "-t", "0.4",
-        "-af", "afade=t=in:st=0:d=0.05,afade=t=out:st=0.3:d=0.1,volume=0.7",
+        "-t", "0.18",
+        "-af", (
+            "aformat=sample_fmts=u8,"          # 8-bit quantize → digital grit
+            "aformat=sample_fmts=fltp,"         # restore float for further processing
+            "aecho=0.6:0.4:12:0.3,"            # short reverb → holographic space
+            "afade=t=out:st=0.12:d=0.06,"
+            "volume=0.8"
+        ),
         "-c:a", "libmp3lame", "-b:a", "128k",
         str(out),
-    ], "generate whoosh SFX")
+    ], "generate digital glitch SFX")
     return out
 
 
@@ -427,11 +442,12 @@ def _crossfade_segments(
     cumsum  = 0.0
 
     for i in range(1, n):
-        cumsum += durations[i - 1]
-        offset  = max(cumsum - xfade_sec * i, 0.001)
-        out_lbl = f"[xf{i}]" if i < n - 1 else "[vout]"
+        cumsum    += durations[i - 1]
+        offset     = max(cumsum - xfade_sec * i, 0.001)
+        out_lbl    = f"[xf{i}]" if i < n - 1 else "[vout]"
+        transition = GLITCH_TRANSITIONS[(i - 1) % len(GLITCH_TRANSITIONS)]
         parts.append(
-            f"{cur_in}[{i}:v] xfade=transition=fade:"
+            f"{cur_in}[{i}:v] xfade=transition={transition}:"
             f"duration={xfade_sec}:offset={offset:.3f} {out_lbl}"
         )
         cur_in = out_lbl
@@ -488,7 +504,15 @@ def _composite(
     if sfx_idx is not None:
         sfx_chain, sfx_label = _build_sfx_chain(sfx_idx, transition_ms)
 
-    video_chain = "[0:v] vignette=PI/6 [video_out];"
+    # Futuristic color grade: boost saturation, push blue/purple channel, vignette
+    video_chain = (
+        "[0:v] "
+        "hue=s=1.35,"                              # saturate neon colors
+        "colorbalance=bs=0.12:ms=0.06:hs=0.04,"   # push blue in shadows/mids
+        "curves=blue='0/0 0.5/0.58 1/1',"         # lift blue curve (cyberpunk tint)
+        "vignette=PI/5"                            # cinematic vignette
+        " [video_out];"
+    )
 
     if music_idx and sfx_label:
         audio = (
