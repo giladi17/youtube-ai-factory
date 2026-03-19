@@ -68,7 +68,7 @@ SCRIPT_SCHEMA = """{
   "cta": "string — 20-second closing call-to-action (like, subscribe, comment hook)",
   "keywords": ["keyword1", "keyword2", "keyword3"],
   "duration_est_sec": 300,
-  "voiceover_text": "string — full continuous narration (hook + body + cta), natural spoken voice, no stage directions"
+  "voiceover_text": "string — PUNCHY BEAT NARRATION: max 5 words per sentence. Hard stop. New line. No filler words. Think TikTok captions read aloud — fast, snappy, impossible to ignore."
 }"""
 
 SYSTEM_PROMPT = """You are a world-class YouTube scriptwriter who has written viral scripts for channels like MrBeast, Veritasium, and MKBHD.
@@ -81,7 +81,8 @@ RULES YOU NEVER BREAK:
 3. Pacing cues ([FAST], [SLOW], [DRAMATIC PAUSE], [ENERGETIC], [CALM]) must match the emotional arc — use [DRAMATIC PAUSE] before any shocking stat.
 4. The title is MAX 50 characters. It must trigger either curiosity, fear, or desire in 3 seconds.
 5. The thumbnail_idea must describe a scene so vivid a designer can recreate it without asking questions.
-6. voiceover_text must read like a human speaks — contractions, short punchy sentences, rhetorical questions.
+6. voiceover_text must read like a human speaks — contractions, rhetorical questions, zero corporate language.
+7. BEAT WRITING LAW — Every sentence in body[].text AND voiceover_text MUST be 2-5 words maximum. No exceptions. Write like this: "This changes everything. Three days ago. OpenAI dropped something. Nobody noticed. Here is what happened." Hard stops. Short bursts. The viewer's brain cannot scroll away from incomplete thoughts.
 
 Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
 """ + SCRIPT_SCHEMA
